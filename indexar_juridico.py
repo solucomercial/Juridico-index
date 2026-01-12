@@ -1,224 +1,139 @@
 import os
+import hashlib
 import uuid
-import sys
-import platform
-import subprocess
 import time
-import psutil
+import logging
+import traceback
+import resend
+import urllib3
+from dotenv import load_dotenv # Nova biblioteca
+from pymongo import MongoClient
+from opensearchpy import OpenSearch, helpers
 from tqdm import tqdm
-
-import meilisearch
 import pytesseract
 from pdf2image import convert_from_path
 import pdfplumber
 
+# 1. CARREGAR VARIÁVEIS DO FICHEIRO .ENV
+load_dotenv()
+
+# Silenciar avisos de SSL
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ==================================================
-# CONFIGURAÇÕES
+# CONFIGURAÇÕES (LIDAS DO AMBIENTE)
 # ==================================================
-PASTA_DOCUMENTOS = os.getenv("PASTA_DOCUMENTOS", "./documentos")
-MEILI_URL = os.getenv("MEILI_URL", "http://localhost:7700")
-MEILI_API_KEY = os.getenv("MEILI_API_KEY")
-INDEX_NAME = os.getenv("INDEX_NAME", "juridico")
-IDIOMA_OCR = os.getenv("IDIOMA_OCR", "por")
+PASTA_DOCS = os.getenv("PASTA_DOCUMENTOS")
+MONGO_URI = os.getenv("MONGO_URI")
 
-# Validação básica
-if not MEILI_API_KEY:
-    print("❌ Erro: MEILI_API_KEY não configurada no arquivo .env")
-    sys.exit(1)
+# OpenSearch
+OS_URL = f"https://{os.getenv('OS_HOST')}:{os.getenv('OS_PORT')}"
+OS_AUTH = (os.getenv("OS_USER"), os.getenv("OS_PASS"))
+OS_INDEX = os.getenv("OS_INDEX")
 
-
-# ==================================================
-# CLIENTE MEILISEARCH
-# ==================================================
-client = meilisearch.Client(MEILI_URL, MEILI_API_KEY)
-index = client.index(INDEX_NAME)
-
+# Resend
+resend.api_key = os.getenv("RESEND_API_KEY")
+EMAIL_FROM = os.getenv("EMAIL_SENDER")
+# Converter strings do .env em listas para a API
+EMAILS_TO = os.getenv("EMAIL_TO").split(",")
+EMAILS_CC = os.getenv("EMAIL_CC").split(",")
 
 # ==================================================
-# CONTADORES
+# SISTEMA DE NOTIFICAÇÕES
 # ==================================================
-total_pdfs = 0
-pdfs_lidos = 0
-pdfs_ocr = 0
-docs_indexados = 0
-paginas_processadas = 0
-task_uid_final = None
 
-
-# ==================================================
-# PERFORMANCE
-# ==================================================
-process = psutil.Process(os.getpid())
-cpu_samples = []
-start_time = time.perf_counter()
-
-
-# ==================================================
-# FUNÇÕES AUXILIARES
-# ==================================================
-def versao_tesseract():
+def enviar_notificacao(assunto, html):
     try:
-        out = subprocess.check_output(["tesseract", "--version"], text=True)
-        return out.split("\n")[0]
-    except Exception:
-        return "Não identificado"
+        resend.Emails.send({
+            "from": f"Sistema Jurídico <{EMAIL_FROM}>",
+            "to": EMAILS_TO,
+            "cc": EMAILS_CC,
+            "subject": assunto,
+            "html": html
+        })
+    except Exception as e:
+        logging.error(f"Erro no e-mail: {e}")
 
+# ==================================================
+# FUNÇÕES TÉCNICAS
+# ==================================================
 
-def pdf_tem_texto(caminho_pdf):
+def calcular_hash(caminho):
+    sha = hashlib.sha256()
+    with open(caminho, "rb") as f:
+        while chunk := f.read(8192):
+            sha.update(chunk)
+    return sha.hexdigest()
+
+def extrair_conteudo(caminho):
+    texto_final = ""
     try:
-        with pdfplumber.open(caminho_pdf) as pdf:
-            for page in pdf.pages:
-                texto = page.extract_text()
-                if texto and texto.strip():
-                    return True
-    except Exception:
-        pass
-    return False
-
-
-def extrair_texto_pdf(caminho_pdf):
-    documentos = []
-    global paginas_processadas
-
-    with pdfplumber.open(caminho_pdf) as pdf:
-        for i, page in enumerate(pdf.pages, start=1):
-            texto = page.extract_text()
-            paginas_processadas += 1
-            cpu_samples.append(psutil.cpu_percent(interval=None))
-
-            if texto and texto.strip():
-                documentos.append({
-                    "id": str(uuid.uuid4()),
-                    "arquivo": os.path.basename(caminho_pdf),
-                    "pagina": i,
-                    "caminho": caminho_pdf,
-                    "conteudo": texto
-                })
-
-    return documentos
-
-
-def ocr_pdf(caminho_pdf):
-    documentos = []
-    global paginas_processadas
-
-    imagens = convert_from_path(caminho_pdf, dpi=300)
-
-    for i, imagem in enumerate(imagens, start=1):
-        texto = pytesseract.image_to_string(imagem, lang=IDIOMA_OCR)
-        paginas_processadas += 1
-        cpu_samples.append(psutil.cpu_percent(interval=None))
-
-        if texto.strip():
-            documentos.append({
-                "id": str(uuid.uuid4()),
-                "arquivo": os.path.basename(caminho_pdf),
-                "pagina": i,
-                "caminho": caminho_pdf,
-                "conteudo": texto
-            })
-
-    return documentos
-
+        with pdfplumber.open(caminho) as pdf:
+            for p in pdf.pages:
+                t = p.extract_text()
+                if t: texto_final += t + "\n"
+        
+        if len(texto_final.strip()) < 50:
+            imagens = convert_from_path(caminho, dpi=200)
+            for img in imagens:
+                texto_final += pytesseract.image_to_string(img, lang="por") + "\n"
+    except Exception as e:
+        logging.warning(f"Erro extração {caminho}: {e}")
+    return texto_final
 
 # ==================================================
-# PROCESSAMENTO PRINCIPAL
+# LÓGICA PRINCIPAL
 # ==================================================
-def processar_pasta():
-    global total_pdfs, pdfs_lidos, pdfs_ocr, docs_indexados, task_uid_final
 
-    documentos_para_indexar = []
+def executar():
+    m_client = MongoClient(MONGO_URI)
+    colecao = m_client["juridico_db"]["arquivos"]
+    
+    os_client = OpenSearch(
+        hosts=[OS_URL],
+        http_auth=OS_AUTH,
+        use_ssl=True, verify_certs=False, ssl_show_warn=False
+    )
 
-    pdfs = []
-    for root, _, files in os.walk(PASTA_DOCUMENTOS):
-        for file in files:
-            if file.lower().endswith(".pdf"):
-                pdfs.append(os.path.join(root, file))
+    arquivos = [os.path.join(PASTA_DOCS, f) for f in os.listdir(PASTA_DOCS) if f.lower().endswith('.pdf')]
+    
+    contador = 0
+    buffer = []
 
-    total_pdfs = len(pdfs)
+    for caminho in tqdm(arquivos, desc="Processando"):
+        h = calcular_hash(caminho)
+        if colecao.find_one({"hash": h}): continue
 
-    for caminho in tqdm(pdfs, desc="Processando PDFs"):
-        cpu_samples.append(psutil.cpu_percent(interval=None))
+        txt = extrair_conteudo(caminho)
+        if not txt.strip(): continue
 
-        if pdf_tem_texto(caminho):
-            docs = extrair_texto_pdf(caminho)
-            pdfs_lidos += 1
-        else:
-            docs = ocr_pdf(caminho)
-            pdfs_ocr += 1
+        contador += 1
+        buffer.append({
+            "_index": OS_INDEX,
+            "_id": str(uuid.uuid4()),
+            "hash": h,
+            "arquivo": os.path.basename(caminho),
+            "conteudo": txt,
+            "data": time.ctime()
+        })
 
-        documentos_para_indexar.extend(docs)
+        if len(buffer) >= 100:
+            helpers.bulk(os_client, buffer)
+            colecao.insert_many([{"hash": d["hash"]} for d in buffer])
+            buffer = []
 
-    docs_indexados = len(documentos_para_indexar)
+    if buffer:
+        helpers.bulk(os_client, buffer)
+        colecao.insert_many([{"hash": d["hash"]} for d in buffer])
+    
+    return contador
 
-    if documentos_para_indexar:
-        task = index.add_documents(documentos_para_indexar)
-        task_uid_final = task.task_uid
-
-        print("\n📤 Documentos enviados ao Meilisearch")
-        print(f"🆔 Task UID: {task_uid_final}")
-        print("⏳ Indexação em andamento no servidor (modo assíncrono)")
-
-
-# ==================================================
-# RESUMOS
-# ==================================================
-def resumo_final():
-    print("\n📊 RESUMO DA INDEXAÇÃO")
-    print("=" * 45)
-    print(f"📂 Origem dos documentos: {PASTA_DOCUMENTOS}")
-    print(f"📂 PDFs processados: {total_pdfs}")
-    print(f"📄 PDFs lidos direto: {pdfs_lidos}")
-    print(f"📷 PDFs com OCR: {pdfs_ocr}")
-    print(f"📑 Páginas processadas: {paginas_processadas}")
-    print(f"🧾 Documentos enviados: {docs_indexados}")
-    print(f"🆔 Task Meilisearch: {task_uid_final}")
-    print("=" * 45)
-    print("✅ INDEXAÇÃO DISPARADA COM SUCESSO")
-
-
-def resumo_tecnico():
-    end_time = time.perf_counter()
-    tempo_execucao = end_time - start_time
-    cpu_media = sum(cpu_samples) / len(cpu_samples) if cpu_samples else 0
-    memoria_mb = process.memory_info().rss / (1024 ** 2)
-
-    print("\n🛠️ RESUMO TÉCNICO & PERFORMANCE")
-    print("=" * 45)
-
-    print(f"🖥️ Sistema Operacional: {platform.system()} {platform.release()}")
-    print(f"🐧 Ambiente WSL: {'Sim' if 'microsoft' in platform.release().lower() else 'Não'}")
-    print(f"🐍 Python: {sys.version.split()[0]}")
-    print(f"📦 Virtualenv: {os.environ.get('VIRTUAL_ENV', 'Não identificado')}")
-
-    print("\n⚙️ Recursos do Sistema:")
-    print(f"• Núcleos CPU: {psutil.cpu_count(logical=True)}")
-    print(f"• Uso médio de CPU: {cpu_media:.2f}%")
-    print(f"• Uso de memória RAM: {memoria_mb:.2f} MB")
-    print(f"• Tempo total de execução: {tempo_execucao:.2f} segundos")
-
-    print("\n📚 Tecnologias Utilizadas:")
-    print("• OCR: Tesseract OCR")
-    print("• PDF Parser: pdfplumber")
-    print("• OCR Engine: pytesseract")
-    print("• Busca: Meilisearch")
-
-    print("\n🔍 OCR:")
-    print(f"• Idioma: {IDIOMA_OCR}")
-    print(f"• Versão Tesseract: {versao_tesseract()}")
-
-    print("\n🚀 Indexação:")
-    print(f"• Índice: {INDEX_NAME}")
-    print(f"• Task UID: {task_uid_final}")
-
-    print("=" * 45)
-
-
-# ==================================================
-# MAIN
-# ==================================================
 if __name__ == "__main__":
-    processar_pasta()
-    resumo_final()
-    resumo_tecnico()
+    logging.basicConfig(filename='index.log', level=logging.INFO)
+    start = time.time()
+    try:
+        total = executar()
+        tempo = (time.time() - start) / 60
+        enviar_notificacao(f"✅ Sucesso: {total} novos arquivos", f"<p>Tempo: {tempo:.2f} min</p>")
+    except Exception:
+        enviar_notificacao("❌ Erro no Indexador", f"<pre>{traceback.format_exc()}</pre>")
