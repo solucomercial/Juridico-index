@@ -1,22 +1,26 @@
 # 📂 Jurídico OCR & Indexer
 
-Este projeto automatiza a leitura, processamento de OCR e indexação de documentos PDF em um servidor **Meilisearch**. Ele é capaz de identificar PDFs que já possuem texto (leitura direta) e PDFs que são apenas imagens (aplicando OCR via Tesseract).
+Este projeto automatiza a leitura, processamento de OCR e indexação de documentos PDF em um servidor **OpenSearch**. Ele é capaz de identificar PDFs que já possuem texto (leitura direta) e PDFs que são apenas imagens (aplicando OCR via Tesseract). Utiliza MongoDB para rastrear arquivos processados e Resend para notificações por e-mail.
 
 ## ✨ Funcionalidades
 
 * **Extração Inteligente**: Detecta automaticamente se o PDF precisa de OCR ou se possui texto nativo.
 * **OCR de Alta Resolução**: Utiliza Tesseract OCR com processamento de imagem via `pdf2image`.
-* **Indexação Rápida**: Integração direta com Meilisearch para buscas de texto completo (Full-text search).
-* **Monitoramento de Performance**: Relatórios de uso de CPU, memória e tempo de execução.
-* **Suporte a WSL/Linux**: Otimizado para ambientes de alta performance.
+* **Indexação Rápida**: Integração direta com OpenSearch para buscas de texto completo (Full-text search).
+* **Rastreamento de Arquivos**: Usa MongoDB para evitar reprocessamento de arquivos já indexados.
+* **Notificações por E-mail**: Envia relatórios de sucesso ou erro via Resend.
+* **Interface Web**: Página HTML simples para realizar buscas nos documentos indexados.
+* **Suporte a WSL/Linux/Windows**: Otimizado para diversos ambientes.
 
 ## 🛠️ Tecnologias Utilizadas
 
 * **Python 3.12+**
-* **Meilisearch**: Motor de busca.
+* **OpenSearch**: Motor de busca.
+* **MongoDB**: Banco de dados para rastreamento.
+* **Resend**: Serviço de e-mail para notificações.
 * **Tesseract OCR**: Mecanismo de reconhecimento óptico de caracteres.
 * **pdfplumber**: Extração de texto de PDFs nativos.
-* **psutil & tqdm**: Monitoramento e barras de progresso.
+* **psutil & tqdm**: Monitoramento e barras de progresso (usados implicitamente).
 
 ---
 
@@ -66,43 +70,63 @@ Crie um arquivo `.env` na raiz do projeto com base no modelo abaixo:
 | Variável | Descrição | Exemplo |
 | --- | --- | --- |
 | `PASTA_DOCUMENTOS` | Caminho para a pasta contendo os PDFs. | `/caminho/para/pdf` |
-| `MEILI_URL` | URL da instância do Meilisearch. | `http://localhost:7700` |
-| `MEILI_API_KEY` | Chave mestra ou de escrita do Meilisearch. | `sua_chave_aqui` |
-| `INDEX_NAME` | Nome do índice onde os dados serão salvos. | `juridico` |
+| `MONGO_URI` | URI de conexão com MongoDB. | `mongodb://localhost:27017` |
+| `OS_HOST` | Host do OpenSearch. | `localhost` |
+| `OS_PORT` | Porta do OpenSearch. | `9200` |
+| `OS_USER` | Usuário do OpenSearch. | `admin` |
+| `OS_PASS` | Senha do OpenSearch. | `password` |
+| `OS_INDEX` | Nome do índice no OpenSearch. | `juridico` |
+| `RESEND_API_KEY` | Chave da API do Resend. | `sua_chave_aqui` |
+| `EMAIL_SENDER` | E-mail do remetente. | `noreply@exemplo.com` |
+| `EMAIL_TO` | Lista de e-mails destinatários (separados por vírgula). | `user1@exemplo.com,user2@exemplo.com` |
+| `EMAIL_CC` | Lista de e-mails em cópia (separados por vírgula). | `cc@exemplo.com` |
 | `IDIOMA_OCR` | Idioma utilizado pelo Tesseract. | `por` |
 
 ---
 
 ## 📈 Uso e Execução
 
+### Indexação de Documentos
+
 Para iniciar o processo de indexação, execute:
 
+**Linux/WSL:**
 ```bash
 python indexar_juridico.py
+```
 
+**Windows:**
+```batch
+executar_indexador.bat
 ```
 
 O script realizará o seguinte fluxo:
 
 1. Varre a pasta configurada em busca de arquivos `.pdf`.
-2. Verifica se o arquivo contém texto extraível.
-3. Se não contiver, converte as páginas em imagens e aplica o OCR.
-4. Envia os blocos de texto formatados para o Meilisearch.
-5. Exibe um resumo técnico de performance ao final.
+2. Verifica se o arquivo já foi processado (usando hash armazenado no MongoDB).
+3. Extrai o texto diretamente ou aplica OCR se necessário.
+4. Indexa o conteúdo no OpenSearch.
+5. Envia notificação por e-mail com o resultado.
+
+### Interface Web de Busca
+
+Abra o arquivo `index.html` em um navegador web para realizar buscas nos documentos indexados. A interface permite pesquisar termos no conteúdo dos PDFs e visualizar trechos destacados.
+
+Certifique-se de que o OpenSearch esteja acessível e as credenciais estejam corretas no código do HTML (atualmente hardcoded).
 
 ---
 
 ## 📝 Estrutura do Documento Indexado
 
-Cada página de PDF é salva no Meilisearch com a seguinte estrutura JSON:
+Cada PDF é salvo no OpenSearch com a seguinte estrutura JSON:
 
 ```json
 {
   "id": "uuid-v4",
+  "hash": "sha256-hash-do-arquivo",
   "arquivo": "nome_do_arquivo.pdf",
-  "pagina": 1,
-  "caminho": "/caminho/completo/arquivo.pdf",
-  "conteudo": "Texto extraído da página..."
+  "conteudo": "Texto extraído do PDF...",
+  "data": "Data de indexação"
 }
 
 ```
