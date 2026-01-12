@@ -6,7 +6,7 @@ import logging
 import traceback
 import resend
 import urllib3
-from dotenv import load_dotenv # Nova biblioteca
+from dotenv import load_dotenv 
 from pymongo import MongoClient
 from opensearchpy import OpenSearch, helpers
 from tqdm import tqdm
@@ -23,7 +23,10 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ==================================================
 # CONFIGURAÇÕES (LIDAS DO AMBIENTE)
 # ==================================================
-PASTA_DOCS = os.getenv("PASTA_DOCUMENTOS")
+# ALTERAÇÃO: Lendo a string e convertendo em uma lista de caminhos
+PASTAS_DOCS_RAW = os.getenv("PASTA_DOCUMENTOS", "")
+PASTAS_DOCS = [p.strip() for p in PASTAS_DOCS_RAW.split(";") if p.strip()]
+
 MONGO_URI = os.getenv("MONGO_URI")
 
 # OpenSearch
@@ -34,12 +37,11 @@ OS_INDEX = os.getenv("OS_INDEX")
 # Resend
 resend.api_key = os.getenv("RESEND_API_KEY")
 EMAIL_FROM = os.getenv("EMAIL_SENDER")
-# Converter strings do .env em listas para a API
 EMAILS_TO = os.getenv("EMAIL_TO").split(",")
 EMAILS_CC = os.getenv("EMAIL_CC").split(",")
 
 # ==================================================
-# SISTEMA DE NOTIFICAÇÕES
+# SISTEMA DE NOTIFICAÇÕES (Mantido igual)
 # ==================================================
 
 def enviar_notificacao(assunto, html):
@@ -55,7 +57,7 @@ def enviar_notificacao(assunto, html):
         logging.error(f"Erro no e-mail: {e}")
 
 # ==================================================
-# FUNÇÕES TÉCNICAS
+# FUNÇÕES TÉCNICAS (Mantido igual)
 # ==================================================
 
 def calcular_hash(caminho):
@@ -95,32 +97,45 @@ def executar():
         use_ssl=True, verify_certs=False, ssl_show_warn=False
     )
 
-    arquivos = [os.path.join(PASTA_DOCS, f) for f in os.listdir(PASTA_DOCS) if f.lower().endswith('.pdf')]
-    
+    # ALTERAÇÃO: Coleta arquivos de todas as pastas configuradas
+    arquivos = []
+    for pasta in PASTAS_DOCS:
+        if os.path.exists(pasta):
+            print(f"Buscando arquivos em: {pasta}")
+            novos_arquivos = [os.path.join(pasta, f) for f in os.listdir(pasta) if f.lower().endswith('.pdf')]
+            arquivos.extend(novos_arquivos)
+        else:
+            logging.warning(f"Caminho configurado não existe: {pasta}")
+
     contador = 0
     buffer = []
 
     for caminho in tqdm(arquivos, desc="Processando"):
-        h = calcular_hash(caminho)
-        if colecao.find_one({"hash": h}): continue
+        try:
+            h = calcular_hash(caminho)
+            if colecao.find_one({"hash": h}): continue
 
-        txt = extrair_conteudo(caminho)
-        if not txt.strip(): continue
+            txt = extrair_conteudo(caminho)
+            if not txt.strip(): continue
 
-        contador += 1
-        buffer.append({
-            "_index": OS_INDEX,
-            "_id": str(uuid.uuid4()),
-            "hash": h,
-            "arquivo": os.path.basename(caminho),
-            "conteudo": txt,
-            "data": time.ctime()
-        })
+            contador += 1
+            buffer.append({
+                "_index": OS_INDEX,
+                "_id": str(uuid.uuid4()),
+                "hash": h,
+                "arquivo": os.path.basename(caminho),
+                "conteudo": txt,
+                "caminho_original": caminho, # Útil para saber de qual pasta veio
+                "data": time.ctime()
+            })
 
-        if len(buffer) >= 100:
-            helpers.bulk(os_client, buffer)
-            colecao.insert_many([{"hash": d["hash"]} for d in buffer])
-            buffer = []
+            if len(buffer) >= 100:
+                helpers.bulk(os_client, buffer)
+                colecao.insert_many([{"hash": d["hash"]} for d in buffer])
+                buffer = []
+        except Exception as e:
+            logging.error(f"Erro ao processar {caminho}: {e}")
+            continue
 
     if buffer:
         helpers.bulk(os_client, buffer)
