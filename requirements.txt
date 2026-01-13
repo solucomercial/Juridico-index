@@ -1,0 +1,9 @@
+pymongo
+opensearch-py
+python-dotenv
+tqdm
+pdfplumber
+pytesseract
+pdf2image
+resend
+urllib3
