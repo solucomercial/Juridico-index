@@ -24,7 +24,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ==================================================
 # CONFIGURAÇÕES (LIDAS DO AMBIENTE)
 # ==================================================
-# ALTERAÇÃO: Lendo a string e convertendo em uma lista de caminhos
 PASTAS_DOCS_RAW = os.getenv("PASTA_DOCUMENTOS", "")
 PASTAS_DOCS = [p.strip() for p in PASTAS_DOCS_RAW.split(";") if p.strip()]
 
@@ -42,7 +41,7 @@ EMAILS_TO = os.getenv("EMAIL_TO").split(",")
 EMAILS_CC = os.getenv("EMAIL_CC").split(",")
 
 # ==================================================
-# SISTEMA DE NOTIFICAÇÕES (Mantido igual)
+# SISTEMA DE NOTIFICAÇÕES
 # ==================================================
 
 def enviar_notificacao(assunto, html):
@@ -71,11 +70,16 @@ def configurar_logger():
     memory_handler = logging.StreamHandler(log_stream)
     memory_handler.setFormatter(formatter)
 
-    logging.basicConfig(level=logging.INFO, handlers=[file_handler, memory_handler])
+    # Configura o logger raiz para capturar tudo
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(memory_handler)
+    
     return log_stream
 
 # ==================================================
-# FUNÇÕES TÉCNICAS (Mantido igual)
+# FUNÇÕES TÉCNICAS
 # ==================================================
 
 def calcular_hash(caminho):
@@ -94,11 +98,12 @@ def extrair_conteudo(caminho):
                 if t: texto_final += t + "\n"
         
         if len(texto_final.strip()) < 50:
+            logging.info(f"Texto curto detectado em {caminho}. Iniciando OCR...")
             imagens = convert_from_path(caminho, dpi=200)
             for img in imagens:
                 texto_final += pytesseract.image_to_string(img, lang="por") + "\n"
     except Exception as e:
-        logging.warning(f"Erro extração {caminho}: {e}")
+        logging.warning(f"Erro na extração de {caminho}: {e}")
     return texto_final
 
 # ==================================================
@@ -115,26 +120,37 @@ def executar():
         use_ssl=True, verify_certs=False, ssl_show_warn=False
     )
 
-    # ALTERAÇÃO: Coleta arquivos de todas as pastas configuradas
     arquivos = []
+    logging.info(f"Iniciando varredura em {len(PASTAS_DOCS)} pastas configuradas.")
+    
     for pasta in PASTAS_DOCS:
         if os.path.exists(pasta):
-            logging.info(f"Buscando arquivos em: {pasta}")
+            logging.info(f"Buscando arquivos em: {os.path.abspath(pasta)}")
             novos_arquivos = [os.path.join(pasta, f) for f in os.listdir(pasta) if f.lower().endswith('.pdf')]
+            logging.info(f"Encontrados {len(novos_arquivos)} PDFs em {pasta}")
             arquivos.extend(novos_arquivos)
         else:
-            logging.warning(f"Caminho configurado não existe: {pasta}")
+            logging.warning(f"Caminho não encontrado ou inacessível: {pasta}")
 
     contador = 0
     buffer = []
 
     for caminho in tqdm(arquivos, desc="Processando"):
+        caminho_completo = os.path.abspath(caminho)
         try:
             h = calcular_hash(caminho)
-            if colecao.find_one({"hash": h}): continue
+            
+            # Verifica se já existe no MongoDB
+            if colecao.find_one({"hash": h}):
+                logging.info(f"Pulando (já indexado): {caminho_completo}")
+                continue
 
+            logging.info(f"Processando novo arquivo: {caminho_completo}")
             txt = extrair_conteudo(caminho)
-            if not txt.strip(): continue
+            
+            if not txt.strip():
+                logging.warning(f"Conteúdo vazio após extração/OCR: {caminho_completo}")
+                continue
 
             contador += 1
             buffer.append({
@@ -143,23 +159,25 @@ def executar():
                 "hash": h,
                 "arquivo": os.path.basename(caminho),
                 "conteudo": txt,
-                "caminho_original": caminho, # Útil para saber de qual pasta veio
+                "caminho_original": caminho_completo,
                 "data": time.ctime()
             })
 
             if len(buffer) >= 100:
                 helpers.bulk(os_client, buffer)
                 colecao.insert_many([{"hash": d["hash"]} for d in buffer])
+                logging.info(f"Lote de 100 arquivos enviado para OpenSearch/Mongo.")
                 buffer = []
         except Exception as e:
-            logging.error(f"Erro ao processar {caminho}: {e}")
+            logging.error(f"Erro crítico ao processar {caminho_completo}: {e}")
             continue
 
     if buffer:
         helpers.bulk(os_client, buffer)
         colecao.insert_many([{"hash": d["hash"]} for d in buffer])
+        logging.info(f"Lote final de {len(buffer)} arquivos enviado.")
     
-    logging.info(f"Total processado: {contador}")
+    logging.info(f"Finalizado. Total de novos arquivos indexados: {contador}")
     return contador
 
 if __name__ == "__main__":
@@ -170,10 +188,17 @@ if __name__ == "__main__":
         tempo = (time.time() - start) / 60
         enviar_notificacao(
             f"✅ Sucesso: {total} novos arquivos",
-            f"<p>Tempo: {tempo:.2f} min</p><pre>{log_stream.getvalue()}</pre>"
+            f"<h3>Relatório de Execução</h3>"
+            f"<p><b>Tempo Total:</b> {tempo:.2f} min</p>"
+            f"<p><b>Novos Documentos:</b> {total}</p>"
+            f"<hr><h4>Logs Detalhados:</h4>"
+            f"<pre style='background: #f4f4f4; padding: 10px; border: 1px solid #ddd;'>{log_stream.getvalue()}</pre>"
         )
     except Exception:
         enviar_notificacao(
             "❌ Erro no Indexador",
-            f"<pre>{traceback.format_exc()}</pre><hr><pre>{log_stream.getvalue()}</pre>"
+            f"<h3>Falha Crítica Detectada</h3>"
+            f"<pre style='color: red;'>{traceback.format_exc()}</pre>"
+            f"<hr><h4>Logs capturados antes da falha:</h4>"
+            f"<pre style='background: #f4f4f4; padding: 10px; border: 1px solid #ddd;'>{log_stream.getvalue()}</pre>"
         )
