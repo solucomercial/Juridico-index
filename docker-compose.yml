@@ -4,8 +4,9 @@ services:
   indexador:
     build: .
     container_name: indexador
+    network_mode: "host"
     env_file:
       - .env
     volumes:
-      - /dados:/dados
+      - /mnt/juridico:/dados
     restart: "no"
