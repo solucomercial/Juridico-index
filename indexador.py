@@ -128,16 +128,24 @@ def executar():
 
     arquivos = []
     resumo_pastas = []
-    logging.info(f"Iniciando varredura em {len(PASTAS_DOCS)} pastas configuradas.")
+    logging.info(f"Iniciando varredura RECURSIVA em {len(PASTAS_DOCS)} pastas configuradas.")
     
     for pasta in PASTAS_DOCS:
         pasta_abs = os.path.abspath(pasta)
         if os.path.exists(pasta):
-            logging.info(f"Buscando arquivos em: {pasta_abs}")
-            novos_arquivos = [os.path.join(pasta, f) for f in os.listdir(pasta) if f.lower().endswith('.pdf')]
-            logging.info(f"Encontrados {len(novos_arquivos)} PDFs em {pasta}")
-            resumo_pastas.append((pasta_abs, len(novos_arquivos)))
-            arquivos.extend(novos_arquivos)
+            logging.info(f"Buscando arquivos recursivamente em: {pasta_abs}")
+            contador_pasta = 0
+            
+            # Percorre recursivamente todas as subpastas
+            for root, dirs, files in os.walk(pasta_abs):
+                pdfs_nesta_pasta = [os.path.join(root, f) for f in files if f.lower().endswith('.pdf')]
+                if pdfs_nesta_pasta:
+                    logging.info(f"  → {len(pdfs_nesta_pasta)} PDFs encontrados em: {root}")
+                    contador_pasta += len(pdfs_nesta_pasta)
+                    arquivos.extend(pdfs_nesta_pasta)
+            
+            logging.info(f"Total acumulado em {pasta_abs}: {contador_pasta} PDFs")
+            resumo_pastas.append((pasta_abs, contador_pasta))
         else:
             logging.warning(f"Caminho não encontrado ou inacessível: {pasta}")
             resumo_pastas.append((f"{pasta_abs} (inacessível)", 0))
