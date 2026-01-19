@@ -30,7 +30,8 @@ PASTAS_DOCS = [p.strip() for p in PASTAS_DOCS_RAW.split(";") if p.strip()]
 MONGO_URI = os.getenv("MONGO_URI")
 
 # OpenSearch
-OS_URL = f"https://{os.getenv('OS_HOST')}:{os.getenv('OS_PORT')}"
+OS_PROTOCOL = os.getenv("OS_PROTOCOL", "http") # Padrão para http se não existir no .env
+OS_URL = f"{OS_PROTOCOL}://{os.getenv('OS_HOST')}:{os.getenv('OS_PORT')}"
 OS_AUTH = (os.getenv("OS_USER"), os.getenv("OS_PASS"))
 OS_INDEX = os.getenv("OS_INDEX")
 
@@ -117,7 +118,9 @@ def executar():
     os_client = OpenSearch(
         hosts=[OS_URL],
         http_auth=OS_AUTH,
-        use_ssl=True, verify_certs=False, ssl_show_warn=False
+        use_ssl=(OS_PROTOCOL == "https"), # Só ativa SSL se o protocolo for https
+        verify_certs=False, 
+        ssl_show_warn=False
     )
 
     arquivos = []
