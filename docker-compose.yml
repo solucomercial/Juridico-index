@@ -6,5 +6,5 @@ services:
     env_file:
       - .env
     volumes:
-      - /mnt/juridico:/dados
+      - /mnt/ocr-juridico:/dados
     restart: "no"
