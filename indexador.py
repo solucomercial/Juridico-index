@@ -65,7 +65,7 @@ def configurar_logger():
     log_stream = io.StringIO()
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 
-    file_handler = logging.FileHandler("index.log")
+    file_handler = logging.FileHandler("index.log", encoding='utf-8')
     file_handler.setFormatter(formatter)
 
     memory_handler = logging.StreamHandler(log_stream)
@@ -76,6 +76,9 @@ def configurar_logger():
     root_logger.setLevel(logging.INFO)
     root_logger.addHandler(file_handler)
     root_logger.addHandler(memory_handler)
+    
+    # Captura warnings do Python também
+    logging.captureWarnings(True)
     
     return log_stream
 
@@ -141,18 +144,21 @@ def executar():
 
     contador = 0
     buffer = []
+    total_arquivos = len(arquivos)
+    logging.info(f"Total de {total_arquivos} arquivos para processar.")
 
-    for caminho in tqdm(arquivos, desc="Processando"):
+    for idx, caminho in enumerate(arquivos, 1):
         caminho_completo = os.path.abspath(caminho)
+        logging.info(f"[{idx}/{total_arquivos}] Verificando: {caminho_completo}")
         try:
             h = calcular_hash(caminho)
             
             # Verifica se já existe no MongoDB
             if colecao.find_one({"hash": h}):
-                logging.info(f"Pulando (já indexado): {caminho_completo}")
+                logging.debug(f"Pulando (já indexado): {os.path.basename(caminho_completo)}")
                 continue
 
-            logging.info(f"Processando novo arquivo: {caminho_completo}")
+            logging.info(f"✓ Processando novo arquivo: {os.path.basename(caminho_completo)}")
             txt = extrair_conteudo(caminho)
             
             if not txt.strip():
@@ -190,26 +196,51 @@ def executar():
 if __name__ == "__main__":
     log_stream = configurar_logger()
     start = time.time()
+    logging.info("="*50)
+    logging.info("INICIANDO INDEXADOR JURÍDICO")
+    logging.info("="*50)
+    
     try:
         total, resumo_pastas = executar()
         tempo = (time.time() - start) / 60
+        logging.info("="*50)
+        logging.info(f"EXECUÇÃO CONCLUÍDA COM SUCESSO")
+        logging.info(f"Tempo total: {tempo:.2f} minutos")
+        logging.info(f"Novos arquivos indexados: {total}")
+        logging.info("="*50)
+        
         resumo_html = "<ul>" + "".join([f"<li>{p}: {q} PDFs encontrados</li>" for p, q in resumo_pastas]) + "</ul>"
+        logs_completos = log_stream.getvalue()
+        
         enviar_notificacao(
             f"✅ Sucesso: {total} novos arquivos",
             f"<h3>Relatório de Execução</h3>"
             f"<p><b>Tempo Total:</b> {tempo:.2f} min</p>"
             f"<p><b>Novos Documentos:</b> {total}</p>"
             f"<p><b>Pastas processadas:</b>{resumo_html}</p>"
-            f"<hr><h4>Logs Detalhados:</h4>"
-            f"<pre style='background: #f4f4f4; padding: 10px; border: 1px solid #ddd;'>{log_stream.getvalue()}</pre>"
+            f"<hr><h4>Logs Detalhados (100% capturados):</h4>"
+            f"<pre style='background: #f4f4f4; padding: 10px; border: 1px solid #ddd; overflow-x: auto; white-space: pre-wrap;'>{logs_completos}</pre>"
         )
-    except Exception:
+        logging.info("E-mail de sucesso enviado.")
+        
+    except Exception as e:
+        logging.error("="*50)
+        logging.error("ERRO CRÍTICO NA EXECUÇÃO")
+        logging.error("="*50)
+        logging.error(f"Tipo de erro: {type(e).__name__}")
+        logging.error(f"Mensagem: {str(e)}")
+        logging.error(f"Traceback completo:\n{traceback.format_exc()}")
+        
         resumo_html = "<ul>" + "".join([f"<li>{p}: {q} PDFs encontrados</li>" for p, q in resumo_pastas]) + "</ul>" if 'resumo_pastas' in locals() else "<p>Execução falhou antes da varredura de pastas.</p>"
+        logs_completos = log_stream.getvalue()
+        
         enviar_notificacao(
             "❌ Erro no Indexador",
             f"<h3>Falha Crítica Detectada</h3>"
-            f"<pre style='color: red;'>{traceback.format_exc()}</pre>"
+            f"<pre style='color: red; background: #ffe6e6; padding: 10px; border: 1px solid #ff0000;'>{traceback.format_exc()}</pre>"
             f"<p><b>Pastas processadas (até a falha):</b>{resumo_html}</p>"
-            f"<hr><h4>Logs capturados antes da falha:</h4>"
-            f"<pre style='background: #f4f4f4; padding: 10px; border: 1px solid #ddd;'>{log_stream.getvalue()}</pre>"
+            f"<hr><h4>Logs Completos (100% capturados antes da falha):</h4>"
+            f"<pre style='background: #f4f4f4; padding: 10px; border: 1px solid #ddd; overflow-x: auto; white-space: pre-wrap;'>{logs_completos}</pre>"
         )
+        logging.error("E-mail de erro enviado.")
+        raise
