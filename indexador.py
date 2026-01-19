@@ -6,6 +6,7 @@ import logging
 import traceback
 import resend
 import urllib3
+import io
 from dotenv import load_dotenv 
 from pymongo import MongoClient
 from opensearchpy import OpenSearch, helpers
@@ -57,6 +58,23 @@ def enviar_notificacao(assunto, html):
         logging.error(f"Erro no e-mail: {e}")
 
 # ==================================================
+# LOGGING
+# ==================================================
+def configurar_logger():
+    """Cria logger que escreve em arquivo e também mantém cópia em memória."""
+    log_stream = io.StringIO()
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+
+    file_handler = logging.FileHandler("index.log")
+    file_handler.setFormatter(formatter)
+
+    memory_handler = logging.StreamHandler(log_stream)
+    memory_handler.setFormatter(formatter)
+
+    logging.basicConfig(level=logging.INFO, handlers=[file_handler, memory_handler])
+    return log_stream
+
+# ==================================================
 # FUNÇÕES TÉCNICAS (Mantido igual)
 # ==================================================
 
@@ -101,7 +119,7 @@ def executar():
     arquivos = []
     for pasta in PASTAS_DOCS:
         if os.path.exists(pasta):
-            print(f"Buscando arquivos em: {pasta}")
+            logging.info(f"Buscando arquivos em: {pasta}")
             novos_arquivos = [os.path.join(pasta, f) for f in os.listdir(pasta) if f.lower().endswith('.pdf')]
             arquivos.extend(novos_arquivos)
         else:
@@ -141,14 +159,21 @@ def executar():
         helpers.bulk(os_client, buffer)
         colecao.insert_many([{"hash": d["hash"]} for d in buffer])
     
+    logging.info(f"Total processado: {contador}")
     return contador
 
 if __name__ == "__main__":
-    logging.basicConfig(filename='index.log', level=logging.INFO)
+    log_stream = configurar_logger()
     start = time.time()
     try:
         total = executar()
         tempo = (time.time() - start) / 60
-        enviar_notificacao(f"✅ Sucesso: {total} novos arquivos", f"<p>Tempo: {tempo:.2f} min</p>")
+        enviar_notificacao(
+            f"✅ Sucesso: {total} novos arquivos",
+            f"<p>Tempo: {tempo:.2f} min</p><pre>{log_stream.getvalue()}</pre>"
+        )
     except Exception:
-        enviar_notificacao("❌ Erro no Indexador", f"<pre>{traceback.format_exc()}</pre>")
+        enviar_notificacao(
+            "❌ Erro no Indexador",
+            f"<pre>{traceback.format_exc()}</pre><hr><pre>{log_stream.getvalue()}</pre>"
+        )
