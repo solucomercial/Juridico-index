@@ -121,16 +121,20 @@ def executar():
     )
 
     arquivos = []
+    resumo_pastas = []
     logging.info(f"Iniciando varredura em {len(PASTAS_DOCS)} pastas configuradas.")
     
     for pasta in PASTAS_DOCS:
+        pasta_abs = os.path.abspath(pasta)
         if os.path.exists(pasta):
-            logging.info(f"Buscando arquivos em: {os.path.abspath(pasta)}")
+            logging.info(f"Buscando arquivos em: {pasta_abs}")
             novos_arquivos = [os.path.join(pasta, f) for f in os.listdir(pasta) if f.lower().endswith('.pdf')]
             logging.info(f"Encontrados {len(novos_arquivos)} PDFs em {pasta}")
+            resumo_pastas.append((pasta_abs, len(novos_arquivos)))
             arquivos.extend(novos_arquivos)
         else:
             logging.warning(f"Caminho não encontrado ou inacessível: {pasta}")
+            resumo_pastas.append((f"{pasta_abs} (inacessível)", 0))
 
     contador = 0
     buffer = []
@@ -178,27 +182,31 @@ def executar():
         logging.info(f"Lote final de {len(buffer)} arquivos enviado.")
     
     logging.info(f"Finalizado. Total de novos arquivos indexados: {contador}")
-    return contador
+    return contador, resumo_pastas
 
 if __name__ == "__main__":
     log_stream = configurar_logger()
     start = time.time()
     try:
-        total = executar()
+        total, resumo_pastas = executar()
         tempo = (time.time() - start) / 60
+        resumo_html = "<ul>" + "".join([f"<li>{p}: {q} PDFs encontrados</li>" for p, q in resumo_pastas]) + "</ul>"
         enviar_notificacao(
             f"✅ Sucesso: {total} novos arquivos",
             f"<h3>Relatório de Execução</h3>"
             f"<p><b>Tempo Total:</b> {tempo:.2f} min</p>"
             f"<p><b>Novos Documentos:</b> {total}</p>"
+            f"<p><b>Pastas processadas:</b>{resumo_html}</p>"
             f"<hr><h4>Logs Detalhados:</h4>"
             f"<pre style='background: #f4f4f4; padding: 10px; border: 1px solid #ddd;'>{log_stream.getvalue()}</pre>"
         )
     except Exception:
+        resumo_html = "<ul>" + "".join([f"<li>{p}: {q} PDFs encontrados</li>" for p, q in resumo_pastas]) + "</ul>" if 'resumo_pastas' in locals() else "<p>Execução falhou antes da varredura de pastas.</p>"
         enviar_notificacao(
             "❌ Erro no Indexador",
             f"<h3>Falha Crítica Detectada</h3>"
             f"<pre style='color: red;'>{traceback.format_exc()}</pre>"
+            f"<p><b>Pastas processadas (até a falha):</b>{resumo_html}</p>"
             f"<hr><h4>Logs capturados antes da falha:</h4>"
             f"<pre style='background: #f4f4f4; padding: 10px; border: 1px solid #ddd;'>{log_stream.getvalue()}</pre>"
         )
