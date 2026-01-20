@@ -47,6 +47,7 @@ EMAILS_CC = os.getenv("EMAIL_CC").split(",")
 
 def enviar_notificacao(assunto, html):
     try:
+        logging.info(f"Enviando e-mail com assunto: {assunto}")
         resend.Emails.send({
             "from": f"Sistema Jurídico <{EMAIL_FROM}>",
             "to": EMAILS_TO,
@@ -54,6 +55,7 @@ def enviar_notificacao(assunto, html):
             "subject": assunto,
             "html": html
         })
+        logging.info("E-mail enviado com sucesso.")
     except Exception as e:
         logging.error(f"Erro no e-mail: {e}")
 
@@ -73,9 +75,13 @@ def configurar_logger():
 
     # Configura o logger raiz para capturar tudo
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
-    root_logger.addHandler(file_handler)
-    root_logger.addHandler(memory_handler)
+    root_logger.setLevel(logging.DEBUG)
+
+    # Evita adicionar handlers duplicados em execuções sucessivas
+    if not any(isinstance(h, logging.FileHandler) for h in root_logger.handlers):
+        root_logger.addHandler(file_handler)
+    if not any(isinstance(h, logging.StreamHandler) and h.stream is log_stream for h in root_logger.handlers):
+        root_logger.addHandler(memory_handler)
     
     # Captura warnings do Python também
     logging.captureWarnings(True)
@@ -87,25 +93,37 @@ def configurar_logger():
 # ==================================================
 
 def calcular_hash(caminho):
+    logging.debug(f"Calculando hash para: {caminho}")
     sha = hashlib.sha256()
     with open(caminho, "rb") as f:
         while chunk := f.read(8192):
             sha.update(chunk)
-    return sha.hexdigest()
+    digest = sha.hexdigest()
+    logging.debug(f"Hash calculado: {digest}")
+    return digest
 
 def extrair_conteudo(caminho):
+    logging.info(f"Extraindo conteúdo de: {caminho}")
     texto_final = ""
     try:
         with pdfplumber.open(caminho) as pdf:
-            for p in pdf.pages:
+            logging.debug(f"PDF aberto com {len(pdf.pages)} página(s)")
+            for i, p in enumerate(pdf.pages, 1):
                 t = p.extract_text()
-                if t: texto_final += t + "\n"
+                if t:
+                    logging.debug(f"Página {i}: texto extraído ({len(t)} chars)")
+                    texto_final += t + "\n"
+                else:
+                    logging.debug(f"Página {i}: sem texto detectado pelo parser")
         
         if len(texto_final.strip()) < 50:
             logging.info(f"Texto curto detectado em {caminho}. Iniciando OCR...")
             imagens = convert_from_path(caminho, dpi=200)
-            for img in imagens:
-                texto_final += pytesseract.image_to_string(img, lang="por") + "\n"
+            logging.debug(f"OCR: {len(imagens)} página(s) convertidas para imagem")
+            for i, img in enumerate(imagens, 1):
+                ocr_texto = pytesseract.image_to_string(img, lang="por")
+                logging.debug(f"OCR página {i}: {len(ocr_texto)} chars extraídos")
+                texto_final += ocr_texto + "\n"
     except Exception as e:
         logging.warning(f"Erro na extração de {caminho}: {e}")
     return texto_final
@@ -115,6 +133,7 @@ def extrair_conteudo(caminho):
 # ==================================================
 
 def executar():
+    logging.info("Iniciando conexão com MongoDB e OpenSearch")
     m_client = MongoClient(MONGO_URI)
     colecao = m_client["juridico_db"]["arquivos"]
     
@@ -125,6 +144,8 @@ def executar():
         verify_certs=False, 
         ssl_show_warn=False
     )
+
+    logging.debug("Clientes criados com sucesso")
 
     arquivos = []
     resumo_pastas = []
@@ -143,6 +164,10 @@ def executar():
                     logging.info(f"  → {len(pdfs_nesta_pasta)} PDFs encontrados em: {root}")
                     contador_pasta += len(pdfs_nesta_pasta)
                     arquivos.extend(pdfs_nesta_pasta)
+
+                # Loga diretórios vazios ou sem PDFs em modo debug
+                if not pdfs_nesta_pasta:
+                    logging.debug(f"  → Nenhum PDF em: {root}")
             
             logging.info(f"Total acumulado em {pasta_abs}: {contador_pasta} PDFs")
             resumo_pastas.append((pasta_abs, contador_pasta))
@@ -174,6 +199,7 @@ def executar():
                 continue
 
             contador += 1
+            logging.debug(f"Adicionando arquivo ao buffer: {os.path.basename(caminho_completo)}")
             buffer.append({
                 "_index": OS_INDEX,
                 "_id": str(uuid.uuid4()),
