@@ -147,7 +147,7 @@ def extrair_conteudo(caminho):
 def executar():
     logging.info("Iniciando conexão com MongoDB e OpenSearch")
     m_client = MongoClient(MONGO_URI)
-    colecao = m_client["juridico_db"]["arquivos"]
+    colecao = m_client["juridico_ocr"]["arquivos"]
     
     os_client = OpenSearch(
         hosts=[OS_URL],
