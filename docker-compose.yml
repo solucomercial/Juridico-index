@@ -1,8 +1,6 @@
 services:
   indexador:
-    build:
-      context: .
-      network: host 
+    build: .
     container_name: indexador
     network_mode: "host"
     env_file:
@@ -10,3 +8,7 @@ services:
     volumes:
       - /mnt/ocr-juridico:/dados
     restart: "no"
+    deploy:
+      resources:
+        limits:
+          memory: 25G
