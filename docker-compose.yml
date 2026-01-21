@@ -1,6 +1,8 @@
 services:
   indexador:
-    build: .
+    build:
+      context: .
+      network: host
     container_name: indexador
     network_mode: "host"
     env_file:
