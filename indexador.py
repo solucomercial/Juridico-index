@@ -64,7 +64,7 @@ def enviar_notificacao(assunto, html):
 def configurar_logger():
     """Cria logger que escreve em arquivo e também mantém cópia em memória."""
     log_stream = io.StringIO()
-    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
     file_handler = logging.FileHandler("index.log", encoding='utf-8')
     file_handler.setFormatter(formatter)
@@ -118,24 +118,24 @@ def extrair_conteudo(caminho):
                 texto = (p.extract_text() or "").strip()
 
                 if len(texto) < 50:
-                    logging.debug(f"Página {i}: texto curto ou vazio ({len(texto)} chars). Iniciando OCR apenas para esta página.")
+                    logging.debug(f"      Página {i}: texto curto ({len(texto)} chars), aplicando OCR...")
                     try:
                         imagens = convert_from_path(caminho, dpi=200, first_page=i, last_page=i)
                         if imagens:
                             ocr_texto = (pytesseract.image_to_string(imagens[0], lang="por") or "").strip()
-                            logging.debug(f"OCR página {i}: {len(ocr_texto)} chars extraídos")
+                            logging.debug(f"      Página {i}: OCR concluído ({len(ocr_texto)} chars)")
                             texto = ocr_texto
                         else:
-                            logging.debug(f"OCR página {i}: nenhuma imagem retornada")
+                            logging.debug(f"      Página {i}: OCR falhou (nenhuma imagem)")
                     except Exception as ocr_err:
-                        logging.warning(f"Erro na OCR da página {i} de {caminho}: {ocr_err}")
+                        logging.warning(f"      Página {i}: erro na OCR: {ocr_err}")
                 else:
-                    logging.debug(f"Página {i}: texto extraído ({len(texto)} chars)")
+                    logging.debug(f"      Página {i}: texto extraído ({len(texto)} chars)")
 
                 if texto:
                     paginas.append({"texto": texto, "pagina": i})
                 else:
-                    logging.debug(f"Página {i}: sem conteúdo após extração/OCR")
+                    logging.debug(f"      Página {i}: conteúdo vazio (pulada)")
     except Exception as e:
         logging.warning(f"Erro na extração de {caminho}: {e}")
     return paginas
@@ -166,109 +166,151 @@ def executar():
     for pasta in PASTAS_DOCS:
         pasta_abs = os.path.abspath(pasta)
         if os.path.exists(pasta):
-            logging.info(f"Buscando arquivos recursivamente em: {pasta_abs}")
+            logging.info(f"\n📂 Processando pasta: {pasta_abs}")
             contador_pasta = 0
             
             # Percorre recursivamente todas as subpastas
             for root, dirs, files in os.walk(pasta_abs):
                 pdfs_nesta_pasta = [os.path.join(root, f) for f in files if f.lower().endswith('.pdf')]
                 if pdfs_nesta_pasta:
-                    logging.info(f"  → {len(pdfs_nesta_pasta)} PDFs encontrados em: {root}")
+                    logging.info(f"   → {len(pdfs_nesta_pasta)} PDF(s) encontrado(s) em: {root}")
                     contador_pasta += len(pdfs_nesta_pasta)
                     arquivos.extend(pdfs_nesta_pasta)
 
                 # Loga diretórios vazios ou sem PDFs em modo debug
                 if not pdfs_nesta_pasta:
-                    logging.debug(f"  → Nenhum PDF em: {root}")
+                    logging.debug(f"   → Nenhum PDF em: {root}")
             
-            logging.info(f"Total acumulado em {pasta_abs}: {contador_pasta} PDFs")
+            if contador_pasta == 0:
+                logging.warning(f"   ⚠️  Nenhum PDF encontrado em {pasta_abs}")
+            else:
+                logging.info(f"   ✓ Total acumulado nesta pasta: {contador_pasta} PDF(s)")
             resumo_pastas.append((pasta_abs, contador_pasta))
         else:
-            logging.warning(f"Caminho não encontrado ou inacessível: {pasta}")
+            logging.warning(f"❌ Caminho não encontrado ou inacessível: {pasta}")
             resumo_pastas.append((f"{pasta_abs} (inacessível)", 0))
 
     contador = 0
     buffer = []
     novos_hashes = set()
     total_arquivos = len(arquivos)
-    logging.info(f"Total de {total_arquivos} arquivos para processar.")
+    
+    logging.info(f"\n{'='*70}")
+    logging.info(f"📊 RESUMO DE DESCOBERTA")
+    logging.info(f"{'='*70}")
+    logging.info(f"Total de PDF(s) encontrado(s): {total_arquivos}")
+    if total_arquivos == 0:
+        logging.warning("⚠️  Nenhum arquivo PDF encontrado. Finalizando...")
+        return 0, resumo_pastas
+    logging.info(f"Iniciando processamento...")
+    logging.info(f"{'='*70}\n")
 
     def flush_buffer():
         if buffer:
             helpers.bulk(os_client, buffer)
-            logging.info(f"Lote de {len(buffer)} páginas enviado para OpenSearch.")
+            logging.info(f"   ✅ Lote de {len(buffer)} páginas(s) enviado para OpenSearch")
             buffer.clear()
         if novos_hashes:
             colecao.insert_many([{"hash": h} for h in novos_hashes])
-            logging.debug(f"{len(novos_hashes)} hash(es) registrados no MongoDB.")
+            logging.info(f"   ✅ {len(novos_hashes)} arquivo(s) registrado(s) no MongoDB")
             novos_hashes.clear()
 
     for idx, caminho in enumerate(arquivos, 1):
         caminho_completo = os.path.abspath(caminho)
         caminho_corrigido = normalizar_caminho(caminho_completo)
-        logging.info(f"[{idx}/{total_arquivos}] Verificando: {caminho_completo}")
+        arquivo_nome = os.path.basename(caminho_completo)
+        
+        logging.info(f"\n{'='*70}")
+        logging.info(f"📄 [{idx}/{total_arquivos}] PROCESSANDO: {arquivo_nome}")
+        logging.info(f"   Local: {caminho_completo}")
+        logging.info(f"{'='*70}")
+        
         try:
             h = calcular_hash(caminho)
+            logging.info(f"   🔐 Hash: {h[:16]}...")
             
             # Verifica se já existe no MongoDB
             if colecao.find_one({"hash": h}):
-                logging.debug(f"Pulando (já indexado): {os.path.basename(caminho_completo)}")
+                logging.info(f"   ⏭️  PULADO: Arquivo já foi indexado anteriormente")
                 continue
 
-            logging.info(f"✓ Processando novo arquivo: {os.path.basename(caminho_completo)}")
+            logging.info(f"   🔍 Extraindo conteúdo...")
             paginas = extrair_conteudo(caminho)
 
             if not paginas:
-                logging.warning(f"Conteúdo vazio após extração/OCR: {caminho_completo}")
+                logging.warning(f"   ⚠️  VAZIO: Nenhum conteúdo após extração/OCR")
                 continue
 
             novos_hashes.add(h)
             contador += 1
 
+            logging.info(f"   📖 {len(paginas)} página(s) extraída(s) com sucesso")
+            
             for pagina in paginas:
                 buffer.append({
                     "_index": OS_INDEX,
                     "_id": f"{h}_{pagina['pagina']}",
                     "hash": h,
-                    "arquivo": os.path.basename(caminho),
+                    "arquivo": arquivo_nome,
                     "conteudo": pagina["texto"],
                     "pagina": pagina["pagina"],
                     "caminho_original": caminho_corrigido,
                     "data": time.ctime()
                 })
+                logging.debug(f"      ├─ Página {pagina['pagina']}: {len(pagina['texto'])} caracteres")
 
                 if len(buffer) >= 100:
+                    logging.info(f"   💾 Buffer cheio ({len(buffer)} documentos), enviando lote...")
                     flush_buffer()
+            
+            logging.info(f"   ✓ Arquivo {arquivo_nome} adicionado ao buffer")
+            
         except Exception as e:
-            logging.error(f"Erro crítico ao processar {caminho_completo}: {e}")
+            logging.error(f"   ❌ ERRO: {str(e)}")
+            logging.debug(f"   Traceback: {traceback.format_exc()}")
             continue
 
     flush_buffer()
     
-    logging.info(f"Finalizado. Total de novos arquivos indexados: {contador}")
-    return contador, resumo_pastas
+    logging.info(f"\n{'='*70}")
+    logging.info(f"✅ PROCESSAMENTO CONCLUÍDO")
+    logging.info(f"{'='*70}")
+    logging.info(f"Total de arquivos processados: {contador}")
+    logging.info(f"Total de páginas indexadas: {contador}")
+    logging.info(f"{'='*70}\n")
 
 if __name__ == "__main__":
     log_stream = configurar_logger()
     start = time.time()
-    logging.info("="*50)
-    logging.info("INICIANDO INDEXADOR JURÍDICO")
-    logging.info("="*50)
+    
+    logging.info("\n")
+    logging.info("╔" + "="*68 + "╗")
+    logging.info("║" + "INDEXADOR JURÍDICO - SISTEMA DE INDEXAÇÃO".center(68) + "║")
+    logging.info("╚" + "="*68 + "╝")
+    logging.info("")
     
     try:
         total, resumo_pastas = executar()
         tempo = (time.time() - start) / 60
-        logging.info("="*50)
-        logging.info(f"EXECUÇÃO CONCLUÍDA COM SUCESSO")
-        logging.info(f"Tempo total: {tempo:.2f} minutos")
-        logging.info(f"Novos arquivos indexados: {total}")
-        logging.info("="*50)
+        
+        logging.info("╔" + "="*68 + "╗")
+        logging.info("║" + "✅ EXECUÇÃO FINALIZADA COM SUCESSO".center(68) + "║")
+        logging.info("╚" + "="*68 + "╝")
+        logging.info(f"⏱️  Tempo total: {tempo:.2f} minutos")
+        logging.info(f"📁 Arquivos processados: {total}")
+        logging.info("")
+        
+        for pasta, qtd in resumo_pastas:
+            status = "✓" if qtd > 0 else "○"
+            logging.info(f"   {status} {pasta}: {qtd} PDF(s)")
+        
+        logging.info("")
         
         resumo_html = "<ul>" + "".join([f"<li>{p}: {q} PDFs encontrados</li>" for p, q in resumo_pastas]) + "</ul>"
         logs_completos = log_stream.getvalue()
         
         enviar_notificacao(
-            f"✅ Sucesso: {total} novos arquivos",
+            f"✅ Sucesso: {total} novos arquivos indexados",
             f"<h3>Relatório de Execução</h3>"
             f"<p><b>Tempo Total:</b> {tempo:.2f} min</p>"
             f"<p><b>Novos Documentos:</b> {total}</p>"
@@ -276,15 +318,17 @@ if __name__ == "__main__":
             f"<hr><h4>Logs Detalhados (100% capturados):</h4>"
             f"<pre style='background: #f4f4f4; padding: 10px; border: 1px solid #ddd; overflow-x: auto; white-space: pre-wrap;'>{logs_completos}</pre>"
         )
-        logging.info("E-mail de sucesso enviado.")
+        logging.info("📧 E-mail de sucesso enviado.")
         
     except Exception as e:
-        logging.error("="*50)
-        logging.error("ERRO CRÍTICO NA EXECUÇÃO")
-        logging.error("="*50)
-        logging.error(f"Tipo de erro: {type(e).__name__}")
-        logging.error(f"Mensagem: {str(e)}")
-        logging.error(f"Traceback completo:\n{traceback.format_exc()}")
+        logging.error("")
+        logging.error("╔" + "="*68 + "╗")
+        logging.error("║" + "❌ ERRO CRÍTICO NA EXECUÇÃO".center(68) + "║")
+        logging.error("╚" + "="*68 + "╝")
+        logging.error(f"🔴 Tipo de erro: {type(e).__name__}")
+        logging.error(f"📝 Mensagem: {str(e)}")
+        logging.error(f"📋 Traceback completo:\n{traceback.format_exc()}")
+        logging.error("")
         
         resumo_html = "<ul>" + "".join([f"<li>{p}: {q} PDFs encontrados</li>" for p, q in resumo_pastas]) + "</ul>" if 'resumo_pastas' in locals() else "<p>Execução falhou antes da varredura de pastas.</p>"
         logs_completos = log_stream.getvalue()
@@ -297,5 +341,5 @@ if __name__ == "__main__":
             f"<hr><h4>Logs Completos (100% capturados antes da falha):</h4>"
             f"<pre style='background: #f4f4f4; padding: 10px; border: 1px solid #ddd; overflow-x: auto; white-space: pre-wrap;'>{logs_completos}</pre>"
         )
-        logging.error("E-mail de erro enviado.")
+        logging.error("📧 E-mail de erro enviado.")
         raise
