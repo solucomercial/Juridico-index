@@ -1,6 +1,5 @@
 import os
 import hashlib
-import uuid
 import time
 import logging
 import traceback
@@ -102,31 +101,44 @@ def calcular_hash(caminho):
     logging.debug(f"Hash calculado: {digest}")
     return digest
 
+
+def normalizar_caminho(caminho):
+    caminho_abs = os.path.abspath(caminho)
+    if caminho_abs.startswith("/dados"):
+        return caminho_abs.replace("/dados", "//10.130.1.99/DeptosMatriz/Juridico", 1)
+    return caminho_abs
+
 def extrair_conteudo(caminho):
     logging.info(f"Extraindo conteúdo de: {caminho}")
-    texto_final = ""
+    paginas = []
     try:
         with pdfplumber.open(caminho) as pdf:
             logging.debug(f"PDF aberto com {len(pdf.pages)} página(s)")
             for i, p in enumerate(pdf.pages, 1):
-                t = p.extract_text()
-                if t:
-                    logging.debug(f"Página {i}: texto extraído ({len(t)} chars)")
-                    texto_final += t + "\n"
+                texto = (p.extract_text() or "").strip()
+
+                if len(texto) < 50:
+                    logging.debug(f"Página {i}: texto curto ou vazio ({len(texto)} chars). Iniciando OCR apenas para esta página.")
+                    try:
+                        imagens = convert_from_path(caminho, dpi=200, first_page=i, last_page=i)
+                        if imagens:
+                            ocr_texto = (pytesseract.image_to_string(imagens[0], lang="por") or "").strip()
+                            logging.debug(f"OCR página {i}: {len(ocr_texto)} chars extraídos")
+                            texto = ocr_texto
+                        else:
+                            logging.debug(f"OCR página {i}: nenhuma imagem retornada")
+                    except Exception as ocr_err:
+                        logging.warning(f"Erro na OCR da página {i} de {caminho}: {ocr_err}")
                 else:
-                    logging.debug(f"Página {i}: sem texto detectado pelo parser")
-        
-        if len(texto_final.strip()) < 50:
-            logging.info(f"Texto curto detectado em {caminho}. Iniciando OCR...")
-            imagens = convert_from_path(caminho, dpi=200)
-            logging.debug(f"OCR: {len(imagens)} página(s) convertidas para imagem")
-            for i, img in enumerate(imagens, 1):
-                ocr_texto = pytesseract.image_to_string(img, lang="por")
-                logging.debug(f"OCR página {i}: {len(ocr_texto)} chars extraídos")
-                texto_final += ocr_texto + "\n"
+                    logging.debug(f"Página {i}: texto extraído ({len(texto)} chars)")
+
+                if texto:
+                    paginas.append({"texto": texto, "pagina": i})
+                else:
+                    logging.debug(f"Página {i}: sem conteúdo após extração/OCR")
     except Exception as e:
         logging.warning(f"Erro na extração de {caminho}: {e}")
-    return texto_final
+    return paginas
 
 # ==================================================
 # LÓGICA PRINCIPAL
@@ -177,11 +189,23 @@ def executar():
 
     contador = 0
     buffer = []
+    novos_hashes = set()
     total_arquivos = len(arquivos)
     logging.info(f"Total de {total_arquivos} arquivos para processar.")
 
+    def flush_buffer():
+        if buffer:
+            helpers.bulk(os_client, buffer)
+            logging.info(f"Lote de {len(buffer)} páginas enviado para OpenSearch.")
+            buffer.clear()
+        if novos_hashes:
+            colecao.insert_many([{"hash": h} for h in novos_hashes])
+            logging.debug(f"{len(novos_hashes)} hash(es) registrados no MongoDB.")
+            novos_hashes.clear()
+
     for idx, caminho in enumerate(arquivos, 1):
         caminho_completo = os.path.abspath(caminho)
+        caminho_corrigido = normalizar_caminho(caminho_completo)
         logging.info(f"[{idx}/{total_arquivos}] Verificando: {caminho_completo}")
         try:
             h = calcular_hash(caminho)
@@ -192,37 +216,34 @@ def executar():
                 continue
 
             logging.info(f"✓ Processando novo arquivo: {os.path.basename(caminho_completo)}")
-            txt = extrair_conteudo(caminho)
-            
-            if not txt.strip():
+            paginas = extrair_conteudo(caminho)
+
+            if not paginas:
                 logging.warning(f"Conteúdo vazio após extração/OCR: {caminho_completo}")
                 continue
 
+            novos_hashes.add(h)
             contador += 1
-            logging.debug(f"Adicionando arquivo ao buffer: {os.path.basename(caminho_completo)}")
-            buffer.append({
-                "_index": OS_INDEX,
-                "_id": str(uuid.uuid4()),
-                "hash": h,
-                "arquivo": os.path.basename(caminho),
-                "conteudo": txt,
-                "caminho_original": caminho_completo,
-                "data": time.ctime()
-            })
 
-            if len(buffer) >= 100:
-                helpers.bulk(os_client, buffer)
-                colecao.insert_many([{"hash": d["hash"]} for d in buffer])
-                logging.info(f"Lote de 100 arquivos enviado para OpenSearch/Mongo.")
-                buffer = []
+            for pagina in paginas:
+                buffer.append({
+                    "_index": OS_INDEX,
+                    "_id": f"{h}_{pagina['pagina']}",
+                    "hash": h,
+                    "arquivo": os.path.basename(caminho),
+                    "conteudo": pagina["texto"],
+                    "pagina": pagina["pagina"],
+                    "caminho_original": caminho_corrigido,
+                    "data": time.ctime()
+                })
+
+                if len(buffer) >= 100:
+                    flush_buffer()
         except Exception as e:
             logging.error(f"Erro crítico ao processar {caminho_completo}: {e}")
             continue
 
-    if buffer:
-        helpers.bulk(os_client, buffer)
-        colecao.insert_many([{"hash": d["hash"]} for d in buffer])
-        logging.info(f"Lote final de {len(buffer)} arquivos enviado.")
+    flush_buffer()
     
     logging.info(f"Finalizado. Total de novos arquivos indexados: {contador}")
     return contador, resumo_pastas
