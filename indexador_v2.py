@@ -7,6 +7,7 @@ import resend
 import urllib3
 import io
 import gc
+import base64
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import partial
 from dotenv import load_dotenv 
@@ -75,6 +76,7 @@ def enviar_notificacao(assunto, html, caminho_log_arquivo=None):
     - Apenas resumo no corpo da mensagem (não logs completos)
     - Logs anexados como arquivo .txt se disponível
     - Evita sobrecarga de RAM e limites de tamanho de e-mail
+    - Codificação Base64 correta para compatibilidade com Resend API
     
     Args:
         assunto: Assunto do e-mail
@@ -95,20 +97,20 @@ def enviar_notificacao(assunto, html, caminho_log_arquivo=None):
         # Se houver um arquivo de log, anexar como arquivo
         if caminho_log_arquivo and os.path.exists(caminho_log_arquivo):
             try:
-                with open(caminho_log_arquivo, "r", encoding="utf-8") as f:
+                # Ler em modo binário para Base64 correto
+                with open(caminho_log_arquivo, "rb") as f:
                     log_conteudo = f.read()
                 
-                # Resend espera conteúdo base64
-                import base64
-                encoded = base64.b64encode(log_conteudo.encode("utf-8")).decode()
+                # Codificar em Base64 (compatível com Resend API)
+                encoded_log = base64.b64encode(log_conteudo).decode("utf-8")
                 
                 email_data["attachments"] = [
                     {
                         "filename": "logs.txt",
-                        "content": encoded
+                        "content": encoded_log
                     }
                 ]
-                logging.info("Log anexado ao e-mail")
+                logging.info("Log anexado ao e-mail com sucesso")
             except Exception as attach_err:
                 logging.warning(f"Não foi possível anexar log: {attach_err}")
         
