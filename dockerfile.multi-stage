@@ -1,0 +1,38 @@
+# Multi-stage build para reduzir tamanho final da imagem
+# Stage 1: Build
+FROM python:3.12-slim as builder
+
+# Instala dependências do sistema necessárias para compilação
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt .
+
+# Instala dependências Python em um diretório virtual
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Stage 2: Runtime (imagem final menor)
+FROM python:3.12-slim
+
+# Instala apenas dependências de runtime necessárias
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tesseract-ocr \
+    tesseract-ocr-por \
+    poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copia o ambiente virtual do builder
+COPY --from=builder /opt/venv /opt/venv
+
+# Define o PATH para usar o venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /app
+COPY . .
+
+# Ajustado para o novo nome do ficheiro
+CMD ["python", "indexador_v2.py"]

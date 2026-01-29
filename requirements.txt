@@ -7,3 +7,4 @@ pytesseract
 pdf2image
 resend
 urllib3
+tenacity
