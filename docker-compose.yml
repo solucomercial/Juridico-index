@@ -8,7 +8,10 @@ services:
     env_file:
       - .env
     volumes:
-      - /mnt/ocr-juridico:/dados
+      - /mnt/ocr-juridico:/juridico
+      - /mnt/ocr-juridico-people:/people
+      - /mnt/ocr-juridico-Sign:/sign
+      - /mnt/ocr-juridico-sign_original_files:/sign_original_files
     restart: "no"
     deploy:
       resources:
