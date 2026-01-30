@@ -1,84 +1,86 @@
 import os
 import hashlib
+import uuid
 import time
 import logging
 import traceback
 import resend
 import urllib3
 import io
-import gc
-import base64
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dotenv import load_dotenv
+from dotenv import load_dotenv 
 from pymongo import MongoClient
 from opensearchpy import OpenSearch, helpers
-from opensearchpy.exceptions import ConnectionError as OpenSearchConnectionError
 from tqdm import tqdm
 import pytesseract
 from pdf2image import convert_from_path
 import pdfplumber
-from tenacity import retry, stop_after_attempt, wait_exponential
 
-# ==================================================
-# 1️⃣ ENV e CONFIGURAÇÃO
-# ==================================================
+# 1. CARREGAR VARIÁVEIS DO FICHEIRO .ENV
 load_dotenv()
+
+# Silenciar avisos de SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-PASTAS_DOCS = [p.strip() for p in os.getenv("PASTA_DOCUMENTOS", "").split(";") if p.strip()]
+# ==================================================
+# CONFIGURAÇÕES
+# ==================================================
+PASTAS_DOCS_RAW = os.getenv("PASTA_DOCUMENTOS", "")
+# O split por ";" permite que você cole todos os caminhos no .env
+PASTAS_DOCS = [p.strip() for p in PASTAS_DOCS_RAW.split(";") if p.strip()]
+
 MONGO_URI = os.getenv("MONGO_URI")
+
+# OpenSearch
 OS_PROTOCOL = os.getenv("OS_PROTOCOL", "http")
 OS_URL = f"{OS_PROTOCOL}://{os.getenv('OS_HOST')}:{os.getenv('OS_PORT')}"
 OS_AUTH = (os.getenv("OS_USER"), os.getenv("OS_PASS"))
 OS_INDEX = os.getenv("OS_INDEX")
-OCR_DPI = int(os.getenv("OCR_DPI", "300"))
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", "4"))
+
+# Resend
 resend.api_key = os.getenv("RESEND_API_KEY")
 EMAIL_FROM = os.getenv("EMAIL_SENDER")
 EMAILS_TO = os.getenv("EMAIL_TO").split(",")
-EMAILS_CC = os.getenv("EMAIL_CC").split(",")
+EMAILS_CC = os.getenv("EMAIL_CC", "").split(",") if os.getenv("EMAIL_CC") else []
 
 # ==================================================
-# 2️⃣ LOGGING
+# SISTEMA DE NOTIFICAÇÕES
 # ==================================================
-def configurar_logger():
-    log_stream = io.StringIO()
-    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    file_handler = logging.FileHandler("index.log", encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    memory_handler = logging.StreamHandler(log_stream)
-    memory_handler.setFormatter(formatter)
 
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
-    if not any(isinstance(h, logging.FileHandler) for h in root_logger.handlers):
-        root_logger.addHandler(file_handler)
-    if not any(isinstance(h, logging.StreamHandler) and h.stream is log_stream for h in root_logger.handlers):
-        root_logger.addHandler(memory_handler)
-
-    logging.captureWarnings(True)
-    return log_stream
-
-# ==================================================
-# 3️⃣ FUNÇÕES AUXILIARES
-# ==================================================
-def enviar_notificacao(assunto, html, caminho_log_arquivo=None):
+def enviar_notificacao(assunto, html):
     try:
-        email_data = {
+        resend.Emails.send({
             "from": f"Sistema Jurídico <{EMAIL_FROM}>",
             "to": EMAILS_TO,
             "cc": EMAILS_CC,
             "subject": assunto,
             "html": html
-        }
-        if caminho_log_arquivo and os.path.exists(caminho_log_arquivo):
-            with open(caminho_log_arquivo, "rb") as f:
-                encoded_log = base64.b64encode(f.read()).decode("utf-8")
-            email_data["attachments"] = [{"filename": "logs.txt", "content": encoded_log}]
-        resend.Emails.send(email_data)
-        logging.info("E-mail enviado com sucesso.")
+        })
     except Exception as e:
-        logging.error(f"Erro no envio de e-mail: {e}")
+        logging.error(f"Erro ao enviar e-mail: {e}")
+
+# ==================================================
+# LOGGING
+# ==================================================
+def configurar_logger():
+    log_stream = io.StringIO()
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+
+    file_handler = logging.FileHandler("index.log", encoding='utf-8')
+    file_handler.setFormatter(formatter)
+
+    memory_handler = logging.StreamHandler(log_stream)
+    memory_handler.setFormatter(formatter)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(memory_handler)
+    
+    return log_stream
+
+# ==================================================
+# FUNÇÕES TÉCNICAS
+# ==================================================
 
 def calcular_hash(caminho):
     sha = hashlib.sha256()
@@ -87,175 +89,126 @@ def calcular_hash(caminho):
             sha.update(chunk)
     return sha.hexdigest()
 
-def normalizar_caminho(caminho):
-    return os.path.abspath(caminho)
-
 def extrair_conteudo(caminho):
-    paginas = []
+    texto_final = ""
     try:
+        # Tenta extração direta de texto (PDFs "nativos")
         with pdfplumber.open(caminho) as pdf:
-            for i, p in enumerate(pdf.pages, 1):
-                texto = (p.extract_text() or "").strip()
-                if len(texto) < 50:
-                    try:
-                        imagens = convert_from_path(caminho, dpi=OCR_DPI, first_page=i, last_page=i)
-                        if imagens:
-                            ocr_texto = (pytesseract.image_to_string(imagens[0], lang="por") or "").strip()
-                            texto = ocr_texto
-                            del imagens[0]; del imagens; gc.collect()
-                    except Exception as ocr_err:
-                        logging.warning(f"Erro OCR página {i} em {os.path.basename(caminho)}: {ocr_err}")
-                if texto:
-                    paginas.append({"texto": texto, "pagina": i})
+            for p in pdf.pages:
+                t = p.extract_text()
+                if t: texto_final += t + "\n"
+        
+        # Se extraiu pouco texto, tenta OCR (PDFs digitalizados)
+        if len(texto_final.strip()) < 50:
+            logging.info(f"Iniciando OCR: {os.path.basename(caminho)}")
+            imagens = convert_from_path(caminho, dpi=200)
+            for img in imagens:
+                texto_final += pytesseract.image_to_string(img, lang="por") + "\n"
     except Exception as e:
-        logging.error(f"Erro ao abrir/processar {os.path.basename(caminho)}: {type(e).__name__}: {str(e)}")
-    return paginas
-
-@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=2, max=10))
-def criar_cliente_opensearch():
-    try:
-        client = OpenSearch(
-            hosts=[OS_URL],
-            http_auth=OS_AUTH,
-            use_ssl=(OS_PROTOCOL=="https"),
-            verify_certs=False,
-            ssl_show_warn=False,
-            timeout=30,
-            max_retries=3
-        )
-        client.info()
-        logging.info("Conexão com OpenSearch estabelecida")
-        return client
-    except OpenSearchConnectionError as e:
-        logging.error(f"Falha ao conectar ao OpenSearch: {e}")
-        raise
+        logging.warning(f"Erro na extração de {caminho}: {e}")
+    return texto_final
 
 # ==================================================
-# 4️⃣ WORKER SEGURO PARA THREADS
+# LÓGICA PRINCIPAL
 # ==================================================
-def processar_arquivo(caminho, mongo_uri):
-    """Worker seguro: cria conexão própria com MongoDB"""
-    m_client = MongoClient(mongo_uri)
-    colecao = m_client["juridico_ocr"]["arquivos"]
-    try:
-        caminho_abs = os.path.abspath(caminho)
-        arquivo_nome = os.path.basename(caminho_abs)
-        caminho_corrigido = normalizar_caminho(caminho_abs)
-        h = calcular_hash(caminho)
 
-        # 🔹 BLOCO NOVO: Verificação de hash **antes de abrir PDF**
-        if colecao.find_one({"hash": h}):
-            return (False, h, arquivo_nome, [], caminho_corrigido, "Já indexado")
-
-        paginas = extrair_conteudo(caminho)
-        if not paginas:
-            return (False, h, arquivo_nome, [], caminho_corrigido, "Sem conteúdo")
-
-        return (True, h, arquivo_nome, paginas, caminho_corrigido, None)
-    except Exception as e:
-        return (False, None, os.path.basename(caminho), [], None, str(e))
-
-# ==================================================
-# 5️⃣ FUNÇÃO PRINCIPAL (incremental)
-# ==================================================
 def executar():
-    logging.info("Iniciando execução incremental do indexador")
     m_client = MongoClient(MONGO_URI)
-    colecao = m_client["juridico_ocr"]["arquivos"]
-    os_client = criar_cliente_opensearch()
+    colecao = m_client["juridico_db"]["arquivos"]
+    
+    os_client = OpenSearch(
+        hosts=[OS_URL],
+        http_auth=OS_AUTH,
+        use_ssl=(OS_PROTOCOL == "https"),
+        verify_certs=False, 
+        ssl_show_warn=False
+    )
 
-    # 🔹 BLOCO NOVO: Filtra PDFs já indexados antes de processar
-    arquivos = []
-    for pasta in PASTAS_DOCS:
-        if not os.path.exists(pasta): continue
-        for root, _, files in os.walk(pasta):
-            for f in files:
-                if f.lower().endswith(".pdf"):
-                    caminho = os.path.join(root, f)
-                    h = calcular_hash(caminho)
-                    if not colecao.find_one({"hash": h}):
-                        arquivos.append(caminho)
+    arquivos_para_processar = []
+    resumo_pastas = []
+    
+    logging.info(f"Iniciando varredura em {len(PASTAS_DOCS)} diretórios raiz.")
+    
+    for pasta_raiz in PASTAS_DOCS:
+        if os.path.exists(pasta_raiz):
+            logging.info(f"Varrendo recursivamente: {pasta_raiz}")
+            count_pasta = 0
+            # os.walk permite entrar em todas as subpastas automaticamente
+            for raiz, dirs, files in os.walk(pasta_raiz):
+                for f in files:
+                    if f.lower().endswith('.pdf'):
+                        arquivos_para_processar.append(os.path.join(raiz, f))
+                        count_pasta += 1
+            
+            resumo_pastas.append((pasta_raiz, count_pasta))
+            logging.info(f"Concluído: {count_pasta} PDFs encontrados em {pasta_raiz}")
+        else:
+            logging.warning(f"Caminho inacessível: {pasta_raiz}")
+            resumo_pastas.append((f"{pasta_raiz} (Inacessível)", 0))
 
-    total_arquivos = len(arquivos)
-    logging.info(f"Total de PDFs novos para processar: {total_arquivos}")
-    if total_arquivos == 0: return 0, [], []
+    contador_novos = 0
+    buffer = []
 
-    contador, buffer, novos_hashes, erros = 0, [], set(), []
+    for caminho in tqdm(arquivos_para_processar, desc="Indexando"):
+        try:
+            # Pegar hash para evitar duplicidade
+            h = calcular_hash(caminho)
+            if colecao.find_one({"hash": h}):
+                continue
 
-    def flush_buffer():
-        if buffer:
-            helpers.bulk(os_client, buffer)
-            buffer.clear()
-        if novos_hashes:
-            colecao.insert_many([{"hash": h} for h in novos_hashes])
-            novos_hashes.clear()
+            txt = extrair_conteudo(caminho)
+            if not txt.strip():
+                continue
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(processar_arquivo, caminho, MONGO_URI): caminho for caminho in arquivos}
+            contador_novos += 1
+            buffer.append({
+                "_index": OS_INDEX,
+                "_id": str(uuid.uuid4()),
+                "hash": h,
+                "arquivo": os.path.basename(caminho),
+                "conteudo": txt,
+                "caminho_original": caminho,
+                "data_indexacao": time.strftime('%Y-%m-%d %H:%M:%S')
+            })
 
-        with tqdm(total=total_arquivos, desc="Processando PDFs") as pbar:
-            for future in as_completed(futures):
-                try:
-                    sucesso, h, arquivo_nome, paginas, caminho_corrigido, erro = future.result()
-                    if sucesso and paginas:
-                        novos_hashes.add(h)
-                        contador += 1
-                        for pagina in paginas:
-                            buffer.append({
-                                "_index": OS_INDEX,
-                                "_id": f"{h}_{pagina['pagina']}",
-                                "hash": h,
-                                "arquivo": arquivo_nome,
-                                "conteudo": pagina["texto"],
-                                "pagina": pagina["pagina"],
-                                "caminho_original": caminho_corrigido,
-                                "data": time.ctime()
-                            })
-                            if len(buffer) >= 100: flush_buffer()
-                    elif erro: erros.append(f"{arquivo_nome}: {erro}")
-                except Exception as e: erros.append(f"Erro future: {str(e)}")
-                pbar.update(1)
+            # Envio em lotes (Bulk) para performance
+            if len(buffer) >= 50: # Reduzi para 50 para evitar timeouts em arquivos pesados
+                helpers.bulk(os_client, buffer)
+                colecao.insert_many([{"hash": d["hash"]} for d in buffer])
+                buffer = []
+                
+        except Exception as e:
+            logging.error(f"Erro ao processar {caminho}: {e}")
+            continue
 
-    flush_buffer()
-    logging.info(f"Processamento incremental concluído: {contador} PDF(s) indexado(s)")
+    if buffer:
+        helpers.bulk(os_client, buffer)
+        colecao.insert_many([{"hash": d["hash"]} for d in buffer])
+    
+    return contador_novos, resumo_pastas
 
-    resumo_pastas = [(pasta, sum(1 for f in os.listdir(pasta) if f.lower().endswith(".pdf"))) for pasta in PASTAS_DOCS]
-    return contador, resumo_pastas, erros
-
-# ==================================================
-# 6️⃣ EXECUÇÃO
-# ==================================================
 if __name__ == "__main__":
     log_stream = configurar_logger()
-    start = time.time()
-    logging.info("INDEXADOR JURÍDICO INCREMENTAL - INICIANDO")
+    start_time = time.time()
     try:
-        total, resumo_pastas, erros = executar()
-        tempo = (time.time() - start)/60
-
-        resumo_html = "<ul>" + "".join([f"<li>{p}: {q} PDFs</li>" for p,q in resumo_pastas]) + "</ul>"
-        erros_html = f"<p><b>Erros/Avisos ({len(erros)}):</b></p><ul>" + "".join([f"<li>{e}</li>" for e in erros[:10]]) + \
-                     ("</ul><p>... e %d mais</p>" % (len(erros)-10) if len(erros)>10 else "</ul>") if erros else ""
-
+        total, resumo = executar()
+        duracao = (time.time() - start_time) / 60
+        
+        lista_html = "".join([f"<li><code>{p}</code>: <b>{q}</b> arquivos</li>" for p, q in resumo])
+        
         enviar_notificacao(
-            f"✅ Sucesso: {total} novos PDFs indexados",
-            f"<h3>Relatório Incremental</h3>"
-            f"<p><b>Tempo Total:</b> {tempo:.2f} min</p>"
-            f"<p><b>Novos Documentos:</b> {total}</p>"
-            f"<p><b>Pastas processadas:</b>{resumo_html}</p>"
-            f"{erros_html}"
-            f"<p><i>Logs anexados (index.log)</i></p>",
-            caminho_log_arquivo="index.log"
+            f"✅ Indexação Concluída: {total} novos arquivos",
+            f"<h2>Relatório de Indexação</h2>"
+            f"<p><b>Duração:</b> {duracao:.2f} minutos</p>"
+            f"<p><b>Novos itens adicionados:</b> {total}</p>"
+            f"<h3>Resumo por Origem:</h3><ul>{lista_html}</ul>"
+            f"<hr><h4>Logs:</h4><pre style='font-size:11px;'>{log_stream.getvalue()}</pre>"
         )
-        logging.info("E-mail de sucesso enviado")
-    except Exception as e:
-        logging.error(f"ERRO CRÍTICO: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}")
+    except Exception:
+        error_msg = traceback.format_exc()
+        logging.error(error_msg)
         enviar_notificacao(
-            "❌ Erro no Indexador",
-            f"<h3>Falha Crítica Detectada</h3>"
-            f"<p><b>Tipo de Erro:</b> {type(e).__name__}</p>"
-            f"<p><b>Mensagem:</b> {str(e)}</p>"
-            f"<p><i>Logs anexados (index.log)</i></p>",
-            caminho_log_arquivo="index.log"
+            "❌ Falha no Script de Indexação",
+            f"<h3>Erro Crítico</h3><pre style='color:red;'>{error_msg}</pre>"
+            f"<h4>Logs antes da falha:</h4><pre>{log_stream.getvalue()}</pre>"
         )
-        raise
